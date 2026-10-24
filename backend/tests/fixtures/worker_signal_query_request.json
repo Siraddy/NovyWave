@@ -1,0 +1,9 @@
+{
+  "signals": [
+    {
+      "scope_path": ["top"],
+      "name": "clk"
+    }
+  ],
+  "cursor_tick": 15
+}

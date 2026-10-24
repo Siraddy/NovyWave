@@ -1,4 +1,5 @@
 mod plugins;
+mod surfer_worker;
 
 use jwalk::WalkDir;
 use moon::*;
@@ -7,7 +8,8 @@ use shared::{
     self, AppConfig, CanonicalPathPayload, DownMsg, FileError, FileFormat, FileHierarchy,
     FileSystemItem, PlatformRoot, ScopeData, SignalStatistics, SignalTransition,
     SignalTransitionQuery, SignalTransitionResult, SignalValue, SignalValueQuery,
-    SignalValueResult, UnifiedSignalData, UnifiedSignalRequest, UpMsg, WaveformFile,
+    SignalValueResult, SurferSourceOperation, SurferWorkerError, UnifiedSignalData,
+    UnifiedSignalRequest, UpMsg, WaveformFile,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -65,6 +67,12 @@ struct WaveformMetadata {
 
 static WAVEFORM_METADATA_STORE: Lazy<Arc<Mutex<HashMap<String, WaveformMetadata>>>> =
     Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+/// Routes synthetic worker source IDs without exposing worker or Surver details
+/// to the frontend rendering path.
+static REMOTE_SOURCE_REGISTRY: Lazy<
+    Arc<RwLock<HashMap<String, surfer_worker::RemoteSourceRoute>>>,
+> = Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
 // Track VCD body loading in progress to prevent concurrent loading of same file
 static VCD_LOADING_IN_PROGRESS: Lazy<Arc<Mutex<std::collections::HashSet<String>>>> =
@@ -885,6 +893,24 @@ mod tests {
     }
 
     #[::std::prelude::v1::test]
+    fn remote_source_ids_survive_workspace_path_normalization() {
+        let context = WorkspaceContext::new(PathBuf::from("/tmp/novywave_ai_workspace"), true);
+        let source_id = "surfer-worker://file/12";
+        let unique_id = "surfer-worker://file/12|top.cpu|clk";
+        let scope_id = "scope_surfer-worker://file/12|top.cpu";
+
+        assert_eq!(expand_waveform_source_id(source_id, &context), source_id);
+        assert_eq!(
+            relativize_waveform_source_id(source_id, &context),
+            source_id
+        );
+        assert_eq!(expand_unique_id(unique_id, &context), unique_id);
+        assert_eq!(relativize_unique_id(unique_id, &context), unique_id);
+        assert_eq!(expand_scope_identifier(scope_id, &context), scope_id);
+        assert_eq!(relativize_scope_identifier(scope_id, &context), scope_id);
+    }
+
+    #[::std::prelude::v1::test]
     fn backup_invalid_config_file_moves_to_unique_backup() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1037,6 +1063,153 @@ mod tests {
 /// Global signal cache manager instance
 static SIGNAL_CACHE_MANAGER: Lazy<SignalCacheManager> = Lazy::new(|| SignalCacheManager::new());
 
+fn remote_source_route(source_id: &str) -> Option<surfer_worker::RemoteSourceRoute> {
+    let registry = match REMOTE_SOURCE_REGISTRY.read() {
+        Ok(registry) => registry,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    registry.get(source_id).cloned()
+}
+
+fn register_remote_source(source_id: String, route: surfer_worker::RemoteSourceRoute) {
+    let mut registry = match REMOTE_SOURCE_REGISTRY.write() {
+        Ok(registry) => registry,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    registry.insert(source_id, route);
+}
+
+async fn send_surfer_source_error(
+    operation: SurferSourceOperation,
+    index: Option<usize>,
+    error: SurferWorkerError,
+    session_id: SessionId,
+    cor_id: CorId,
+) {
+    send_down_msg(
+        DownMsg::SurferSourceError {
+            operation,
+            index,
+            error,
+        },
+        session_id,
+        cor_id,
+    )
+    .await;
+}
+
+async fn list_surfer_files(session_id: SessionId, cor_id: CorId) {
+    let client = match surfer_worker::SurferWorkerClient::from_env() {
+        Ok(client) => client,
+        Err(error) => {
+            send_surfer_source_error(SurferSourceOperation::List, None, error, session_id, cor_id)
+                .await;
+            return;
+        }
+    };
+    match client.list_files().await {
+        Ok(files) => {
+            send_down_msg(DownMsg::SurferFilesListed { files }, session_id, cor_id).await;
+        }
+        Err(error) => {
+            send_surfer_source_error(SurferSourceOperation::List, None, error, session_id, cor_id)
+                .await;
+        }
+    }
+}
+
+async fn load_surfer_file(index: usize, session_id: SessionId, cor_id: CorId) {
+    let source_id = surfer_worker::source_id(index);
+    let client = match surfer_worker::SurferWorkerClient::from_env() {
+        Ok(client) => client,
+        Err(error) => {
+            send_surfer_source_error(
+                SurferSourceOperation::Load,
+                Some(index),
+                error,
+                session_id,
+                cor_id,
+            )
+            .await;
+            return;
+        }
+    };
+    match client.load_file(index).await {
+        Ok(loaded) => {
+            let filename = loaded.waveform_file.filename.clone();
+            register_remote_source(source_id.clone(), loaded.route);
+            send_down_msg(
+                DownMsg::ParsingStarted {
+                    file_id: source_id.clone(),
+                    filename,
+                },
+                session_id,
+                cor_id,
+            )
+            .await;
+            send_down_msg(
+                DownMsg::FileLoaded {
+                    file_id: source_id,
+                    hierarchy: FileHierarchy {
+                        files: vec![loaded.waveform_file],
+                    },
+                },
+                session_id,
+                cor_id,
+            )
+            .await;
+        }
+        Err(error) => {
+            send_surfer_source_error(
+                SurferSourceOperation::Load,
+                Some(index),
+                error,
+                session_id,
+                cor_id,
+            )
+            .await;
+        }
+    }
+}
+
+async fn reload_surfer_file(index: usize, session_id: SessionId, cor_id: CorId) {
+    let client = match surfer_worker::SurferWorkerClient::from_env() {
+        Ok(client) => client,
+        Err(error) => {
+            send_surfer_source_error(
+                SurferSourceOperation::Reload,
+                Some(index),
+                error,
+                session_id,
+                cor_id,
+            )
+            .await;
+            return;
+        }
+    };
+    match client.reload_file(index).await {
+        Ok(outcome) => {
+            send_down_msg(
+                DownMsg::SurferFileReloaded { index, outcome },
+                session_id,
+                cor_id,
+            )
+            .await;
+            load_surfer_file(index, session_id, cor_id).await;
+        }
+        Err(error) => {
+            send_surfer_source_error(
+                SurferSourceOperation::Reload,
+                Some(index),
+                error,
+                session_id,
+                cor_id,
+            )
+            .await;
+        }
+    }
+}
+
 async fn up_msg_handler(req: UpMsgRequest<UpMsg>) {
     let (session_id, cor_id) = (req.session_id, req.cor_id);
 
@@ -1053,12 +1226,27 @@ async fn up_msg_handler(req: UpMsgRequest<UpMsg>) {
                 "🔍 BACKEND: Processing LoadWaveformFile for '{}'",
                 file_path
             );
-            load_waveform_file(file_path.clone(), session_id, cor_id).await;
+            if let Some(route) = remote_source_route(file_path) {
+                reload_surfer_file(route.file_index, session_id, cor_id).await;
+            } else if let Some(index) = surfer_worker::parse_source_id(file_path) {
+                load_surfer_file(index, session_id, cor_id).await;
+            } else {
+                load_waveform_file(file_path.clone(), session_id, cor_id).await;
+            }
             debug_log!(
                 DEBUG_BACKEND,
                 "🔍 BACKEND: Completed LoadWaveformFile for '{}'",
                 file_path
             );
+        }
+        UpMsg::ListSurferFiles => {
+            list_surfer_files(session_id, cor_id).await;
+        }
+        UpMsg::LoadSurferFile { index } => {
+            load_surfer_file(*index, session_id, cor_id).await;
+        }
+        UpMsg::ReloadSurferFile { index } => {
+            reload_surfer_file(*index, session_id, cor_id).await;
         }
         UpMsg::GetParsingProgress(file_id) => {
             send_parsing_progress(file_id.clone(), session_id, cor_id).await;
@@ -3081,9 +3269,7 @@ fn expand_config_paths(config: &mut AppConfig) {
         .opened_files
         .iter()
         .map(|payload| {
-            let path_buf = PathBuf::from(&payload.canonical);
-            let absolute = context.to_absolute(&path_buf);
-            CanonicalPathPayload::new(absolute.to_string_lossy().to_string())
+            CanonicalPathPayload::new(expand_waveform_source_id(&payload.canonical, context))
         })
         .collect();
 
@@ -3130,11 +3316,7 @@ fn relativize_config_paths(config: &mut AppConfig) {
         .opened_files
         .iter()
         .map(|payload| {
-            let path_buf = PathBuf::from(&payload.canonical);
-            let normalized = context
-                .to_relative_if_in_workspace(&path_buf)
-                .unwrap_or(path_buf.clone());
-            CanonicalPathPayload::new(normalized.to_string_lossy().to_string())
+            CanonicalPathPayload::new(relativize_waveform_source_id(&payload.canonical, context))
         })
         .collect();
 
@@ -3169,6 +3351,29 @@ fn relativize_config_paths(config: &mut AppConfig) {
         .collect();
 }
 
+fn expand_waveform_source_id(source_id: &str, context: &WorkspaceContext) -> String {
+    if surfer_worker::parse_source_id(source_id).is_some() {
+        source_id.to_string()
+    } else {
+        context
+            .to_absolute(PathBuf::from(source_id))
+            .to_string_lossy()
+            .to_string()
+    }
+}
+
+fn relativize_waveform_source_id(source_id: &str, context: &WorkspaceContext) -> String {
+    if surfer_worker::parse_source_id(source_id).is_some() {
+        return source_id.to_string();
+    }
+    let path = PathBuf::from(source_id);
+    context
+        .to_relative_if_in_workspace(&path)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string()
+}
+
 fn relativize_workspace_directory_path(dir: &str, context: &WorkspaceContext) -> String {
     let root = context.root();
     let root_display = root.to_string_lossy();
@@ -3197,6 +3402,9 @@ fn relativize_workspace_directory_path(dir: &str, context: &WorkspaceContext) ->
 
 fn expand_unique_id(unique_id: &str, context: &WorkspaceContext) -> String {
     if let Some((path_part, rest)) = unique_id.split_once('|') {
+        if surfer_worker::parse_source_id(path_part).is_some() {
+            return unique_id.to_string();
+        }
         let path_buf = PathBuf::from(path_part);
         let absolute = context.to_absolute(&path_buf);
         format!("{}|{}", absolute.to_string_lossy(), rest)
@@ -3209,6 +3417,9 @@ fn expand_unique_id(unique_id: &str, context: &WorkspaceContext) -> String {
 
 fn relativize_unique_id(unique_id: &str, context: &WorkspaceContext) -> String {
     if let Some((path_part, rest)) = unique_id.split_once('|') {
+        if surfer_worker::parse_source_id(path_part).is_some() {
+            return unique_id.to_string();
+        }
         let path_buf = PathBuf::from(path_part);
         let normalized = context
             .to_relative_if_in_workspace(&path_buf)
@@ -3225,6 +3436,9 @@ fn expand_scope_identifier(scope_id: &str, context: &WorkspaceContext) -> String
             Some((path, rest)) => (path, Some(rest)),
             None => (stripped, None),
         };
+        if surfer_worker::parse_source_id(path_part).is_some() {
+            return scope_id.to_string();
+        }
         let path_buf = PathBuf::from(path_part);
         let absolute = context.to_absolute(&path_buf);
         let mut result = format!("scope_{}", absolute.to_string_lossy());
@@ -3244,6 +3458,9 @@ fn relativize_scope_identifier(scope_id: &str, context: &WorkspaceContext) -> St
             Some((path, rest)) => (path, Some(rest)),
             None => (stripped, None),
         };
+        if surfer_worker::parse_source_id(path_part).is_some() {
+            return scope_id.to_string();
+        }
         let path_buf = PathBuf::from(path_part);
         let normalized = context
             .to_relative_if_in_workspace(&path_buf)
@@ -5495,55 +5712,160 @@ async fn handle_unified_signal_query(
 ) {
     debug_log!(
         DEBUG_BACKEND,
-        "🔍 BACKEND: About to call SIGNAL_CACHE_MANAGER.query_unified_signals for request_id: {}",
+        "🔍 BACKEND: Routing unified signal query for request_id: {}",
         request_id
     );
-    match SIGNAL_CACHE_MANAGER
-        .query_unified_signals(signal_requests, cursor_time_ns)
-        .await
-    {
-        Ok((signal_data, cursor_values, statistics)) => {
-            debug_log!(
-                DEBUG_BACKEND,
-                "🔍 BACKEND: SIGNAL_CACHE_MANAGER success - {} signal_data items, {} cursor_values",
-                signal_data.len(),
-                cursor_values.len()
-            );
-            let resp_len = signal_data.len();
-            let cursor_len = cursor_values.len();
-            send_down_msg(
-                DownMsg::UnifiedSignalResponse {
-                    request_id,
-                    signal_data,
-                    cursor_values,
-                    cached_time_range_ns: None, // Cache time range would be computed from signal data bounds
-                    statistics: Some(statistics),
-                },
-                session_id,
-                cor_id,
+    let started_at = Instant::now();
+    let request_order: HashMap<String, usize> = signal_requests
+        .iter()
+        .enumerate()
+        .map(|(position, request)| {
+            (
+                format!(
+                    "{}|{}|{}",
+                    request.file_path, request.scope_path, request.variable_name
+                ),
+                position,
             )
-            .await;
-            debug_log!(
-                DEBUG_BACKEND,
-                "🛰️ BACKEND: UnifiedSignalResponse sent: signal_data={} cursor_values={}",
-                resp_len,
-                cursor_len
-            );
-        }
-        Err(error) => {
-            debug_log!(
-                DEBUG_BACKEND,
-                "🔍 BACKEND: SIGNAL_CACHE_MANAGER error: {}",
-                error
-            );
-            send_down_msg(
-                DownMsg::UnifiedSignalError { request_id, error },
-                session_id,
-                cor_id,
-            )
-            .await;
+        })
+        .collect();
+    let mut local_requests = Vec::new();
+    let mut remote_groups: HashMap<
+        usize,
+        (surfer_worker::RemoteSourceRoute, Vec<UnifiedSignalRequest>),
+    > = HashMap::new();
+    for request in signal_requests {
+        if let Some(route) = remote_source_route(&request.file_path) {
+            remote_groups
+                .entry(route.file_index)
+                .or_insert_with(|| (route.clone(), Vec::new()))
+                .1
+                .push(request);
+        } else {
+            local_requests.push(request);
         }
     }
+
+    let mut all_signal_data = Vec::new();
+    let mut all_cursor_values = BTreeMap::new();
+    let mut cached_signals = 0usize;
+
+    if !local_requests.is_empty() {
+        match SIGNAL_CACHE_MANAGER
+            .query_unified_signals(local_requests, cursor_time_ns)
+            .await
+        {
+            Ok((signal_data, cursor_values, statistics)) => {
+                cached_signals += statistics.cached_signals;
+                all_signal_data.extend(signal_data);
+                all_cursor_values.extend(cursor_values);
+            }
+            Err(error) => {
+                send_down_msg(
+                    DownMsg::UnifiedSignalError { request_id, error },
+                    session_id,
+                    cor_id,
+                )
+                .await;
+                return;
+            }
+        }
+    }
+
+    if !remote_groups.is_empty() {
+        let client = match surfer_worker::SurferWorkerClient::from_env() {
+            Ok(client) => client,
+            Err(error) => {
+                send_surfer_source_error(
+                    SurferSourceOperation::Query,
+                    None,
+                    error.clone(),
+                    session_id,
+                    cor_id,
+                )
+                .await;
+                send_down_msg(
+                    DownMsg::UnifiedSignalError {
+                        request_id,
+                        error: format!("{}: {}", error.code, error.message),
+                    },
+                    session_id,
+                    cor_id,
+                )
+                .await;
+                return;
+            }
+        };
+
+        for (file_index, (route, requests)) in remote_groups {
+            match client
+                .query_signals(&route, &requests, cursor_time_ns)
+                .await
+            {
+                Ok(result) => {
+                    all_signal_data.extend(result.signal_data);
+                    all_cursor_values.extend(result.cursor_values);
+                }
+                Err(error) => {
+                    send_surfer_source_error(
+                        SurferSourceOperation::Query,
+                        Some(file_index),
+                        error.clone(),
+                        session_id,
+                        cor_id,
+                    )
+                    .await;
+                    send_down_msg(
+                        DownMsg::UnifiedSignalError {
+                            request_id,
+                            error: format!("{}: {}", error.code, error.message),
+                        },
+                        session_id,
+                        cor_id,
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+    }
+
+    all_signal_data.sort_by_key(|signal| {
+        request_order
+            .get(&signal.unique_id)
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+    let total_signals = all_signal_data.len();
+    let statistics = SignalStatistics {
+        total_signals,
+        cached_signals,
+        query_time_ms: started_at.elapsed().as_millis() as u64,
+        cache_hit_ratio: if total_signals == 0 {
+            0.0
+        } else {
+            cached_signals as f64 / total_signals as f64
+        },
+    };
+    let cursor_len = all_cursor_values.len();
+    send_down_msg(
+        DownMsg::UnifiedSignalResponse {
+            request_id,
+            signal_data: all_signal_data,
+            cursor_values: all_cursor_values,
+            cached_time_range_ns: None,
+            statistics: Some(statistics),
+        },
+        session_id,
+        cor_id,
+    )
+    .await;
+    debug_log!(
+        DEBUG_BACKEND,
+        "🛰️ BACKEND: UnifiedSignalResponse sent: signal_data={} cursor_values={}",
+        total_signals,
+        cursor_len
+    );
 }
 
 #[moon::main]

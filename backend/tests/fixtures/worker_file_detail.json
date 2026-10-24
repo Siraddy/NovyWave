@@ -1,0 +1,27 @@
+{
+  "contract_version": 1,
+  "file": {
+    "index": 0,
+    "filename": "/waveforms/counter.vcd",
+    "format": "vcd",
+    "bytes": 4096,
+    "bytes_loaded": 4096,
+    "reloading": false,
+    "last_load_ok": true,
+    "last_modified": null
+  },
+  "timescale": { "multiplier": 1, "unit": "ns" },
+  "time_range": { "start_tick": 0, "end_tick": 100 },
+  "scopes": [
+    { "path": ["top"], "name": "top", "kind": "module", "parent_path": [] }
+  ],
+  "signals": [
+    {
+      "scope_path": ["top"],
+      "name": "clk",
+      "width": 1,
+      "kind": "wire",
+      "direction": "unknown"
+    }
+  ]
+}

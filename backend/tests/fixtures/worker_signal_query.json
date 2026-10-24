@@ -1,0 +1,19 @@
+{
+  "contract_version": 1,
+  "file_index": 0,
+  "timescale": { "multiplier": 1, "unit": "ns" },
+  "cursor_tick": 15,
+  "signals": [
+    {
+      "scope_path": ["top"],
+      "name": "clk",
+      "width": 1,
+      "transitions": [
+        { "tick": 0, "value": { "kind": "bits", "text": "0" } },
+        { "tick": 10, "value": { "kind": "bits", "text": "1" } },
+        { "tick": 20, "value": { "kind": "bits", "text": "0" } }
+      ],
+      "cursor_value": { "kind": "bits", "text": "1" }
+    }
+  ]
+}

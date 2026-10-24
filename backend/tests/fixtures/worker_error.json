@@ -1,0 +1,8 @@
+{
+  "contract_version": 1,
+  "error": {
+    "code": "surver_unavailable",
+    "message": "Surver did not respond before the upstream timeout",
+    "retryable": true
+  }
+}

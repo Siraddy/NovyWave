@@ -11,6 +11,16 @@ use toml::value::Table as TomlTable;
 #[derive(Serialize, Deserialize, Debug)]
 pub enum UpMsg {
     LoadWaveformFile(String),
+    /// List waveform files exposed by the configured Surfer worker.
+    ListSurferFiles,
+    /// Load one worker-backed waveform into the existing FileLoaded path.
+    LoadSurferFile {
+        index: usize,
+    },
+    /// Ask the worker to reload a waveform and refresh its hierarchy.
+    ReloadSurferFile {
+        index: usize,
+    },
     GetParsingProgress(String),
     LoadConfig,
     SelectWorkspace {
@@ -61,6 +71,21 @@ pub enum DownMsg {
     FileLoaded {
         file_id: String,
         hierarchy: FileHierarchy,
+    },
+    /// Files currently exposed by the configured Surfer worker.
+    SurferFilesListed {
+        files: Vec<SurferFileSummary>,
+    },
+    /// Completion notification for an explicit worker reload request.
+    SurferFileReloaded {
+        index: usize,
+        outcome: SurferReloadOutcome,
+    },
+    /// Structured worker failure for list, load, query, or reload operations.
+    SurferSourceError {
+        operation: SurferSourceOperation,
+        index: Option<usize>,
+        error: SurferWorkerError,
     },
     ParsingError {
         file_id: String,
@@ -130,6 +155,45 @@ pub enum DownMsg {
         title: String,
         message: String,
     },
+}
+
+// ===== SURFER WORKER TYPES =====
+
+/// Stable frontend-facing metadata for one waveform exposed by the worker.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SurferFileSummary {
+    pub index: usize,
+    pub source_id: String,
+    pub filename: String,
+    pub format: String,
+    pub bytes: u64,
+    pub bytes_loaded: u64,
+    pub reloading: bool,
+    pub last_load_ok: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SurferSourceOperation {
+    List,
+    Load,
+    Query,
+    Reload,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SurferReloadOutcome {
+    Accepted,
+    Unchanged,
+}
+
+/// Stable error shape forwarded from (or synthesized for) the worker boundary.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SurferWorkerError {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
 }
 
 // ===== SIGNAL VALUE QUERY TYPES =====

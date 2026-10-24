@@ -1,0 +1,17 @@
+{
+  "contract_version": 1,
+  "file": {
+    "index": 0,
+    "filename": "/waveforms/empty.vcd",
+    "format": "vcd",
+    "bytes": 0,
+    "bytes_loaded": 0,
+    "reloading": false,
+    "last_load_ok": true,
+    "last_modified": null
+  },
+  "timescale": { "multiplier": 1, "unit": "ns" },
+  "time_range": null,
+  "scopes": [],
+  "signals": []
+}

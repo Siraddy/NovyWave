@@ -1,0 +1,15 @@
+{
+  "contract_version": 1,
+  "file_index": 0,
+  "outcome": "accepted",
+  "file": {
+    "index": 0,
+    "filename": "/waveforms/counter.vcd",
+    "format": "vcd",
+    "bytes": 4096,
+    "bytes_loaded": 4096,
+    "reloading": true,
+    "last_load_ok": true,
+    "last_modified": null
+  }
+}
