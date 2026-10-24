@@ -38,6 +38,7 @@ fn message_name(msg: &UpMsg) -> &'static str {
         UpMsg::ListSurferFiles => "ListSurferFiles",
         UpMsg::LoadSurferFile { .. } => "LoadSurferFile",
         UpMsg::ReloadSurferFile { .. } => "ReloadSurferFile",
+        UpMsg::ResolveSource { .. } => "ResolveSource",
         UpMsg::GetParsingProgress(_) => "GetParsingProgress",
         UpMsg::LoadConfig => "LoadConfig",
         UpMsg::SelectWorkspace { .. } => "SelectWorkspace",
@@ -138,6 +139,7 @@ impl Platform for WebPlatform {
                         | UpMsg::ListSurferFiles
                         | UpMsg::LoadSurferFile { .. }
                         | UpMsg::ReloadSurferFile { .. }
+                        | UpMsg::ResolveSource { .. }
                 );
                 if !SERVER_ALIVE.get() && !is_critical {
                     zoon::println!("platform({label}): suppressing {msg_name}, server not alive");

@@ -392,7 +392,17 @@ impl TrackedFiles {
         loading_file.filename = filename.clone();
 
         let mut current = self.files_vec_signal.get_cloned();
-        if let Some(index) = current.iter().position(|f| f.id == file_id) {
+        let is_reload = current.iter().any(|file| {
+            (file.id == file_id || file.canonical_path == file_id)
+                && matches!(file.state, FileState::Loaded(_))
+        });
+        if is_reload {
+            self.file_reload_started.set(Some(file_id.clone()));
+        }
+        if let Some(index) = current
+            .iter()
+            .position(|f| f.id == file_id || f.canonical_path == file_id)
+        {
             current[index] = loading_file.clone();
         } else {
             current.push(loading_file.clone());

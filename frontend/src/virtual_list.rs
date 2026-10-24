@@ -54,6 +54,7 @@ fn apply_scrollbar_colors(
 pub fn virtual_variables_list_pre_filtered(
     filtered_variables: Vec<VariableWithContext>,
     selected_variables: &crate::selected_variables::SelectedVariables,
+    surfer_integration: &crate::surfer_integration::SurferIntegration,
 ) -> Column<column::EmptyFlagNotSet, RawHtmlEl> {
     // Handle empty states efficiently
     if filtered_variables.is_empty() {
@@ -61,12 +62,17 @@ pub fn virtual_variables_list_pre_filtered(
     }
 
     // Direct rendering - filtering already done at signal level
-    rust_virtual_variables_list_simple_fill(filtered_variables, selected_variables)
+    rust_virtual_variables_list_simple_fill(
+        filtered_variables,
+        selected_variables,
+        surfer_integration,
+    )
 }
 
 pub fn rust_virtual_variables_list_simple_fill(
     variables: Vec<VariableWithContext>,
     selected_variables: &crate::selected_variables::SelectedVariables,
+    surfer_integration: &crate::surfer_integration::SurferIntegration,
 ) -> Column<column::EmptyFlagNotSet, RawHtmlEl> {
     // DYNAMIC HEIGHT SOLUTION: Parent-child pattern with real viewport monitoring
     let height_mutable = Mutable::new(400u32); // Start with reasonable default
@@ -92,6 +98,7 @@ pub fn rust_virtual_variables_list_simple_fill(
                         variables,
                         virtual_list_height,
                         selected_variables.clone(),
+                        surfer_integration.clone(),
                     ),
                 ),
         )
@@ -101,6 +108,7 @@ pub fn rust_virtual_variables_list_with_signal(
     variables: Vec<VariableWithContext>,
     height_signal: Broadcaster<MutableSignal<u32>>,
     selected_variables: crate::selected_variables::SelectedVariables,
+    surfer_integration: crate::surfer_integration::SurferIntegration,
 ) -> Column<column::EmptyFlagNotSet, RawHtmlEl> {
     let total_items = variables.len();
     let item_height = 24.0;
@@ -134,6 +142,7 @@ pub fn rust_virtual_variables_list_with_signal(
                     previous_name_signal: Mutable::new(None),
                     file_id_signal: Mutable::new(String::new()),
                     scope_id_signal: Mutable::new(String::new()),
+                    scope_path_signal: Mutable::new(Vec::new()),
                     variable_signal: Mutable::new(None),
                     is_selected_signal: Mutable::new(false),
                     absolute_index_signal: Mutable::new(0), // Track which virtual item this element represents
@@ -190,6 +199,7 @@ pub fn rust_virtual_variables_list_with_signal(
                             previous_name_signal: Mutable::new(None),
                             file_id_signal: Mutable::new(String::new()),
                             scope_id_signal: Mutable::new(String::new()),
+                            scope_path_signal: Mutable::new(Vec::new()),
                             variable_signal: Mutable::new(None),
                             is_selected_signal: Mutable::new(false),
                             absolute_index_signal: Mutable::new(0),
@@ -234,6 +244,7 @@ pub fn rust_virtual_variables_list_with_signal(
                         visible: bool,
                         file_id: String,
                         scope_id: String,
+                        scope_path: Vec<String>,
                         variable: Option<shared::Signal>,
                         previous_name: Option<String>,
                         is_selected: bool,
@@ -266,6 +277,7 @@ pub fn rust_virtual_variables_list_with_signal(
                                 let width = variable_context.signal.width;
                                 let file_id = &variable_context.file_id;
                                 let scope_id = &variable_context.scope_id;
+                                let scope_path = &variable_context.scope_path;
 
                                 // Format type string once
                                 let type_str = format!("{} {}-bit", signal_type, width);
@@ -314,6 +326,7 @@ pub fn rust_virtual_variables_list_with_signal(
                                     visible: true,
                                     file_id: file_id.clone(),
                                     scope_id: scope_id.clone(),
+                                    scope_path: scope_path.clone(),
                                     variable: Some(variable_context.signal.clone()),
                                     previous_name,
                                     is_selected,
@@ -330,6 +343,7 @@ pub fn rust_virtual_variables_list_with_signal(
                                 visible: false,
                                 file_id: String::new(),
                                 scope_id: String::new(),
+                                scope_path: Vec::new(),
                                 variable: None,
                                 previous_name: None,
                                 is_selected: false,
@@ -351,6 +365,7 @@ pub fn rust_virtual_variables_list_with_signal(
                             element_state.visible_signal.set_neq(update.visible);
                             element_state.file_id_signal.set_neq(update.file_id);
                             element_state.scope_id_signal.set_neq(update.scope_id);
+                            element_state.scope_path_signal.set_neq(update.scope_path);
                             element_state.variable_signal.set_neq(update.variable);
                             element_state.previous_name_signal.set_neq(update.previous_name);
                             element_state.is_selected_signal.set_neq(update.is_selected);
@@ -462,6 +477,9 @@ pub fn rust_virtual_variables_list_with_signal(
                                                                 ),
                                                                 scope_id_signal: Mutable::new(
                                                                     String::new(),
+                                                                ),
+                                                                scope_path_signal: Mutable::new(
+                                                                    Vec::new(),
                                                                 ),
                                                                 variable_signal: Mutable::new(None),
                                                                 is_selected_signal: Mutable::new(
@@ -590,11 +608,13 @@ pub fn rust_virtual_variables_list_with_signal(
                         .layers_signal_vec(element_pool.signal_vec_cloned().map({
                             let hovered_index = hovered_index.clone();
                             let selected_variables_for_map = selected_variables.clone();
+                            let surfer_integration = surfer_integration.clone();
                             move |element_state| {
                                 create_stable_variable_element_hybrid(
                                     element_state,
                                     hovered_index.clone(),
                                     selected_variables_for_map.clone(),
+                                    surfer_integration.clone(),
                                 )
                             }
                         })),
@@ -616,6 +636,7 @@ struct VirtualElementState {
     // Context data for click handlers
     file_id_signal: Mutable<String>,
     scope_id_signal: Mutable<String>,
+    scope_path_signal: Mutable<Vec<String>>,
     variable_signal: Mutable<Option<shared::Signal>>,
     // Selection state for visual feedback
     is_selected_signal: Mutable<bool>,
@@ -629,6 +650,7 @@ fn create_stable_variable_element_hybrid(
     state: VirtualElementState,
     hovered_index: Mutable<Option<usize>>,
     selected_variables: crate::selected_variables::SelectedVariables,
+    surfer_integration: crate::surfer_integration::SurferIntegration,
 ) -> impl Element {
     // Clone selected_variables for the multiple closures that need it
     let selected_variables_1 = selected_variables.clone();
@@ -699,6 +721,27 @@ fn create_stable_variable_element_hybrid(
             ),
         )
         .item(El::new().s(Width::fill()))
+        .item(
+            button()
+                .label("Go to declaration")
+                .variant(ButtonVariant::Ghost)
+                .size(ButtonSize::Small)
+                .on_press({
+                    let file_id_signal = state.file_id_signal.clone();
+                    let scope_path_signal = state.scope_path_signal.clone();
+                    let variable_signal = state.variable_signal.clone();
+                    move || {
+                        if let Some(variable) = variable_signal.get_cloned() {
+                            surfer_integration.resolve_declaration(
+                                file_id_signal.get_cloned(),
+                                scope_path_signal.get_cloned(),
+                                variable.name,
+                            );
+                        }
+                    }
+                })
+                .build(),
+        )
         .item(
             El::new()
                 .s(Font::new().color_signal(primary_6()).size(12))

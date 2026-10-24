@@ -1,7 +1,9 @@
 {
   "contract_version": 1,
+  "generation_id": 0,
   "file": {
     "index": 0,
+    "generation_id": 0,
     "filename": "/waveforms/counter.vcd",
     "format": "vcd",
     "bytes": 4096,
@@ -13,7 +15,24 @@
   "timescale": { "multiplier": 1, "unit": "ns" },
   "time_range": { "start_tick": 0, "end_tick": 100 },
   "scopes": [
-    { "path": ["top"], "name": "top", "kind": "module", "parent_path": [] }
+    {
+      "path": ["top"],
+      "name": "top",
+      "kind": "module",
+      "parent_path": [],
+      "component": "counter",
+      "source_loc": {
+        "path": "rtl/counter.sv",
+        "line": 7,
+        "column": 1,
+        "provenance": "waveform_metadata"
+      },
+      "instantiation_source_loc": {
+        "path": "tb/counter_tb.sv",
+        "line": 21,
+        "provenance": "waveform_metadata"
+      }
+    }
   ],
   "signals": [
     {

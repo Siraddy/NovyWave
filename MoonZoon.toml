@@ -20,8 +20,6 @@ frontend = [
     "shared/src",
     "novyui/moonzoon-novyui/Cargo.toml",
     "novyui/moonzoon-novyui/src",
-    "../Fast2D/crates/fast2d/Cargo.toml",
-    "../Fast2D/crates/fast2d/src",
 ]
 backend = [
     "backend/Cargo.toml",

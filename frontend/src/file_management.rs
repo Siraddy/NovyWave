@@ -11,6 +11,7 @@ pub fn files_panel_with_dialog(
     selected_variables: crate::selected_variables::SelectedVariables,
     file_dialog_visible: Mutable<bool>,
     app_config: crate::config::AppConfig,
+    surfer_integration: crate::surfer_integration::SurferIntegration,
 ) -> impl Element {
     let file_count_broadcaster = tracked_files.files.signal_vec_cloned().len().broadcast();
     El::new()
@@ -29,7 +30,9 @@ pub fn files_panel_with_dialog(
                     Some(IconName::Folder),
                     file_dialog_visible,
                 ))
-                .item(crate::action_buttons::load_surfer_button())
+                .item(crate::action_buttons::load_surfer_button(
+                    surfer_integration,
+                ))
                 .item(El::new().s(Width::growable()))
                 .item(crate::action_buttons::clear_all_files_button(
                     &tracked_files,
@@ -422,9 +425,39 @@ pub fn convert_scope_to_tree_data(scope: &ScopeData) -> Option<TreeViewItemData>
 
     let scope_tree_id = format!("scope_{}", scope.id);
 
+    let mut details = vec![format!("Scope: {}", scope.full_name)];
+    if let Some(component) = &scope.component {
+        details.push(format!("Component: {component}"));
+    }
+    if let Some(location) = &scope.declaration_source {
+        details.push(format!(
+            "Declaration: {}:{}{} [{}]",
+            location.path,
+            location.line,
+            location
+                .column
+                .map(|column| format!(":{column}"))
+                .unwrap_or_default(),
+            location.provenance
+        ));
+    }
+    if let Some(location) = &scope.instantiation_source {
+        details.push(format!(
+            "Instantiation: {}:{}{} [{}]",
+            location.path,
+            location.line,
+            location
+                .column
+                .map(|column| format!(":{column}"))
+                .unwrap_or_default(),
+            location.provenance
+        ));
+    }
+
     Some(
         TreeViewItemData::new(scope_tree_id, scope.name.clone())
             .item_type(TreeViewItemType::Folder)
+            .tooltip(details.join("\n"))
             .with_children(children),
     )
 }

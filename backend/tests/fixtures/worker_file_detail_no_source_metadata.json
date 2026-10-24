@@ -1,0 +1,21 @@
+{
+  "contract_version": 1,
+  "generation_id": 0,
+  "file": {
+    "index": 0,
+    "generation_id": 0,
+    "filename": "/waveforms/no-source.vcd",
+    "format": "vcd",
+    "bytes": 64,
+    "bytes_loaded": 64,
+    "reloading": false,
+    "last_load_ok": true,
+    "last_modified": null
+  },
+  "timescale": { "multiplier": 1, "unit": "ns" },
+  "time_range": { "start_tick": 0, "end_tick": 1 },
+  "scopes": [
+    { "path": ["dut"], "name": "dut", "kind": "module", "parent_path": [] }
+  ],
+  "signals": []
+}

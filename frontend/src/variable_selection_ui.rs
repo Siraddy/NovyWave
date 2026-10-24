@@ -47,10 +47,12 @@ pub fn variables_panel(
     waveform_timeline: &crate::visualizer::timeline::timeline_actor::WaveformTimeline,
     _waveform_canvas: &crate::visualizer::canvas::waveform_canvas::WaveformCanvas,
     app_config: &crate::config::AppConfig,
+    surfer_integration: &crate::surfer_integration::SurferIntegration,
 ) -> impl Element {
     let tracked_files = tracked_files.clone();
     let selected_variables = selected_variables.clone();
     let _waveform_timeline = waveform_timeline.clone();
+    let surfer_integration = surfer_integration.clone();
 
     let sv_for_filter = selected_variables.clone();
     let sv_for_focus = selected_variables.clone();
@@ -146,7 +148,12 @@ pub fn variables_panel(
                                 .build(),
                         ),
                 ),
-            simple_variables_content(&tracked_files, &selected_variables, &app_config),
+            simple_variables_content(
+                &tracked_files,
+                &selected_variables,
+                &app_config,
+                &surfer_integration,
+            ),
         ))
 }
 
@@ -157,12 +164,14 @@ pub fn variables_panel_with_fill(
     waveform_timeline: &crate::visualizer::timeline::timeline_actor::WaveformTimeline,
     waveform_canvas: &crate::visualizer::canvas::waveform_canvas::WaveformCanvas,
     app_config: &crate::config::AppConfig,
+    surfer_integration: &crate::surfer_integration::SurferIntegration,
 ) -> impl Element {
     let tracked_files = tracked_files.clone();
     let selected_variables = selected_variables.clone();
     let waveform_timeline = waveform_timeline.clone();
     let waveform_canvas = waveform_canvas.clone();
     let app_config = app_config.clone();
+    let surfer_integration = surfer_integration.clone();
 
     El::new()
         .s(Width::fill())
@@ -187,6 +196,7 @@ pub fn variables_panel_with_fill(
                         &waveform_timeline,
                         &waveform_canvas,
                         &app_config,
+                        &surfer_integration,
                     ))
                     .into_element()
             } else {
@@ -204,6 +214,7 @@ pub fn variables_panel_with_fill(
                         &waveform_timeline,
                         &waveform_canvas,
                         &app_config,
+                        &surfer_integration,
                     ))
                     .into_element()
             }
@@ -215,10 +226,12 @@ pub fn simple_variables_content(
     tracked_files: &crate::tracked_files::TrackedFiles,
     selected_variables: &crate::selected_variables::SelectedVariables,
     app_config: &crate::config::AppConfig,
+    surfer_integration: &crate::surfer_integration::SurferIntegration,
 ) -> impl Element {
     let tracked_files = tracked_files.clone();
     let selected_variables = selected_variables.clone();
     let app_config = app_config.clone();
+    let surfer_integration = surfer_integration.clone();
     Column::new()
         .s(Gap::new().y(0))
         .s(Height::fill())
@@ -255,6 +268,7 @@ pub fn simple_variables_content(
                             virtual_variables_list_pre_filtered(
                                 filtered_variables,
                                 &selected_variables,
+                                &surfer_integration,
                             )
                         }
                     }

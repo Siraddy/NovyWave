@@ -8,8 +8,8 @@ use shared::{
     self, AppConfig, CanonicalPathPayload, DownMsg, FileError, FileFormat, FileHierarchy,
     FileSystemItem, PlatformRoot, ScopeData, SignalStatistics, SignalTransition,
     SignalTransitionQuery, SignalTransitionResult, SignalValue, SignalValueQuery,
-    SignalValueResult, SurferSourceOperation, SurferWorkerError, UnifiedSignalData,
-    UnifiedSignalRequest, UpMsg, WaveformFile,
+    SignalValueResult, SourceOperation, SourceSignalIdentity, SurferSourceOperation,
+    SurferWorkerError, UnifiedSignalData, UnifiedSignalRequest, UpMsg, WaveformFile,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -1210,6 +1210,90 @@ async fn reload_surfer_file(index: usize, session_id: SessionId, cor_id: CorId) 
     }
 }
 
+async fn resolve_surfer_source(
+    request_id: String,
+    source_id: String,
+    operation: SourceOperation,
+    signal: SourceSignalIdentity,
+    workspace_id: Option<String>,
+    session_id: SessionId,
+    cor_id: CorId,
+) {
+    let Some(index) = surfer_worker::parse_source_id(&source_id) else {
+        send_down_msg(
+            DownMsg::SourceResolutionFailed {
+                request_id,
+                source_id,
+                operation,
+                error: SurferWorkerError {
+                    code: "source_resolution_unsupported".to_string(),
+                    message: "Source resolution is available only for worker-backed waveforms"
+                        .to_string(),
+                    retryable: false,
+                },
+            },
+            session_id,
+            cor_id,
+        )
+        .await;
+        return;
+    };
+    let client = match surfer_worker::SurferWorkerClient::from_env() {
+        Ok(client) => client,
+        Err(error) => {
+            send_down_msg(
+                DownMsg::SourceResolutionFailed {
+                    request_id,
+                    source_id,
+                    operation,
+                    error,
+                },
+                session_id,
+                cor_id,
+            )
+            .await;
+            return;
+        }
+    };
+    match client
+        .resolve_source(
+            index,
+            &source_id,
+            operation,
+            &signal,
+            workspace_id.as_deref(),
+        )
+        .await
+    {
+        Ok(resolution) => {
+            send_down_msg(
+                DownMsg::SourceResolved {
+                    request_id,
+                    source_id,
+                    operation,
+                    resolution,
+                },
+                session_id,
+                cor_id,
+            )
+            .await;
+        }
+        Err(error) => {
+            send_down_msg(
+                DownMsg::SourceResolutionFailed {
+                    request_id,
+                    source_id,
+                    operation,
+                    error,
+                },
+                session_id,
+                cor_id,
+            )
+            .await;
+        }
+    }
+}
+
 async fn up_msg_handler(req: UpMsgRequest<UpMsg>) {
     let (session_id, cor_id) = (req.session_id, req.cor_id);
 
@@ -1247,6 +1331,24 @@ async fn up_msg_handler(req: UpMsgRequest<UpMsg>) {
         }
         UpMsg::ReloadSurferFile { index } => {
             reload_surfer_file(*index, session_id, cor_id).await;
+        }
+        UpMsg::ResolveSource {
+            request_id,
+            source_id,
+            operation,
+            signal,
+            workspace_id,
+        } => {
+            resolve_surfer_source(
+                request_id.clone(),
+                source_id.clone(),
+                *operation,
+                signal.clone(),
+                workspace_id.clone(),
+                session_id,
+                cor_id,
+            )
+            .await;
         }
         UpMsg::GetParsingProgress(file_id) => {
             send_parsing_progress(file_id.clone(), session_id, cor_id).await;
@@ -2715,9 +2817,13 @@ fn extract_scope_data_with_file_path(
         id: format!("{}|{}", file_path, scope.full_name(hierarchy)), // Use full file path + | separator + scope path for unique ID
         name: scope.name(hierarchy).to_string(),
         full_name: scope.full_name(hierarchy),
+        path_components: None,
         children,
         variables,
         scope_type: Some(scope_type_str),
+        component: None,
+        declaration_source: None,
+        instantiation_source: None,
     }
 }
 

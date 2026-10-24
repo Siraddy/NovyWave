@@ -6,8 +6,10 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use shared::{
-    FileFormat, ScopeData, Signal, SignalTransition, SignalValue, SurferFileSummary,
-    SurferReloadOutcome, SurferWorkerError, UnifiedSignalData, UnifiedSignalRequest, WaveformFile,
+    FileFormat, ScopeData, Signal, SignalTransition, SignalValue, SourceLocation, SourceMatch,
+    SourceOperation, SourceResolution, SourceResolutionStatus, SourceSignalIdentity, SourceWarning,
+    SurferFileSummary, SurferReloadOutcome, SurferWorkerError, UnifiedSignalData,
+    UnifiedSignalRequest, WaveformFile,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -87,12 +89,7 @@ impl SurferWorkerClient {
 
     pub async fn list_files(&self) -> Result<Vec<SurferFileSummary>, SurferWorkerError> {
         let response: WorkerFilesResponse = self.get("v1/files").await?;
-        validate_contract_version(response.contract_version)?;
-        Ok(response
-            .files
-            .into_iter()
-            .map(WorkerFileMetadata::into_shared)
-            .collect())
+        response.into_shared()
     }
 
     pub async fn load_file(&self, index: usize) -> Result<LoadedRemoteFile, SurferWorkerError> {
@@ -128,9 +125,18 @@ impl SurferWorkerClient {
         }
 
         let cursor_tick = cursor_time_ns.map(|time_ns| time_ns / route.ns_per_tick);
+        let (common_range, common_max_transitions) =
+            worker_query_controls(requests, route.ns_per_tick);
+        let worker_range_requested = common_range.is_some();
+        let worker_downsample_requested = common_max_transitions.is_some();
         let body = WorkerSignalQueryRequest {
             signals: wire_signals,
             cursor_tick,
+            range: common_range,
+            max_transitions_per_signal: common_max_transitions,
+            downsample: common_max_transitions.map(|_| WorkerDownsampleRequest {
+                strategy: WorkerDownsampleStrategy::PreserveEdges,
+            }),
         };
         let response: WorkerSignalQueryResponse = self
             .post(
@@ -138,7 +144,41 @@ impl SurferWorkerClient {
                 &body,
             )
             .await?;
-        response.into_shared(route, requests, cursor_time_ns.is_some())
+        response.into_shared(
+            route,
+            requests,
+            cursor_time_ns.is_some(),
+            worker_range_requested,
+            worker_downsample_requested,
+        )
+    }
+
+    pub async fn resolve_source(
+        &self,
+        index: usize,
+        source_id: &str,
+        operation: SourceOperation,
+        signal: &SourceSignalIdentity,
+        workspace_id: Option<&str>,
+    ) -> Result<SourceResolution, SurferWorkerError> {
+        let body = WorkerCrossprobeRequest {
+            operation,
+            signal: WorkerSourceSignal {
+                scope_path: signal.scope_path.clone(),
+                name: signal.name.clone(),
+                waveform_file_index: Some(index),
+                waveform_source_id: Some(source_id.to_string()),
+                index_range: signal.index_range.clone().map(Into::into),
+                language: signal.language.clone(),
+                top_module: signal.top_module.clone(),
+                elaboration_context: signal.elaboration_context.clone(),
+            },
+            workspace_id: workspace_id.map(str::to_string),
+        };
+        let response: WorkerCrossprobeResponse = self
+            .post(&format!("v1/files/{index}/crossprobe"), &body)
+            .await?;
+        response.into_shared(index, operation)
     }
 
     pub async fn reload_file(
@@ -263,9 +303,30 @@ struct WorkerFilesResponse {
     files: Vec<WorkerFileMetadata>,
 }
 
+impl WorkerFilesResponse {
+    fn into_shared(self) -> Result<Vec<SurferFileSummary>, SurferWorkerError> {
+        validate_contract_version(self.contract_version)?;
+        let mut seen_indices = HashSet::with_capacity(self.files.len());
+        let mut files = Vec::with_capacity(self.files.len());
+        for file in self.files {
+            if !seen_indices.insert(file.index) {
+                return Err(local_error(
+                    "duplicate_worker_file_index",
+                    format!("Worker listed file index {} more than once", file.index),
+                    false,
+                ));
+            }
+            files.push(file.into_shared());
+        }
+        Ok(files)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct WorkerFileMetadata {
     index: usize,
+    #[serde(default, rename = "generation_id")]
+    _generation_id: Option<u64>,
     filename: String,
     format: String,
     bytes: u64,
@@ -302,6 +363,8 @@ struct WorkerTimestamp {
 #[derive(Debug, Deserialize)]
 struct WorkerFileDetail {
     contract_version: u32,
+    #[serde(default, rename = "generation_id")]
+    _generation_id: Option<u64>,
     file: WorkerFileMetadata,
     timescale: Option<WorkerTimescale>,
     time_range: Option<WorkerTickRange>,
@@ -430,7 +493,7 @@ enum WorkerTimescaleUnit {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct WorkerTickRange {
     start_tick: u64,
     end_tick: u64,
@@ -442,6 +505,38 @@ struct WorkerScope {
     name: String,
     kind: String,
     parent_path: Vec<String>,
+    #[serde(default)]
+    component: Option<String>,
+    #[serde(default)]
+    source_loc: Option<WorkerSourceLocation>,
+    #[serde(default)]
+    instantiation_source_loc: Option<WorkerSourceLocation>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct WorkerSourceLocation {
+    path: String,
+    line: u64,
+    #[serde(default)]
+    column: Option<u32>,
+    #[serde(default = "waveform_metadata_provenance")]
+    provenance: String,
+}
+
+fn waveform_metadata_provenance() -> String {
+    "waveform_metadata".to_string()
+}
+
+impl WorkerSourceLocation {
+    fn into_shared(self) -> Option<SourceLocation> {
+        (self.line > 0 && !self.path.trim().is_empty() && !self.path.chars().any(char::is_control))
+            .then_some(SourceLocation {
+                path: self.path,
+                line: self.line,
+                column: self.column,
+                provenance: self.provenance,
+            })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -555,16 +650,45 @@ fn build_scope_node(
         id: format!("{source_id}|{full_name}"),
         name: scope.name.clone(),
         full_name,
+        path_components: Some(path.to_vec()),
         children,
         variables,
         scope_type: Some(scope.kind.clone()),
+        component: scope.component.clone().filter(|component| {
+            !component.trim().is_empty() && !component.chars().any(char::is_control)
+        }),
+        declaration_source: scope
+            .source_loc
+            .clone()
+            .and_then(WorkerSourceLocation::into_shared),
+        instantiation_source: scope
+            .instantiation_source_loc
+            .clone()
+            .and_then(WorkerSourceLocation::into_shared),
     })
 }
 
 #[derive(Debug, Serialize)]
 struct WorkerSignalQueryRequest {
     signals: Vec<WorkerSignalSelector>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    range: Option<WorkerTickRange>,
     cursor_tick: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_transitions_per_signal: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    downsample: Option<WorkerDownsampleRequest>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct WorkerDownsampleRequest {
+    strategy: WorkerDownsampleStrategy,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkerDownsampleStrategy {
+    PreserveEdges,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq, Hash)]
@@ -573,13 +697,71 @@ struct WorkerSignalSelector {
     name: String,
 }
 
+fn common_requested_range(requests: &[UnifiedSignalRequest]) -> Option<(u64, u64)> {
+    let first = requests.first()?.time_range_ns?;
+    (first.0 < first.1
+        && requests
+            .iter()
+            .all(|request| request.time_range_ns == Some(first)))
+    .then_some(first)
+}
+
+fn common_max_transitions(requests: &[UnifiedSignalRequest]) -> Option<usize> {
+    let first = requests.first()?.max_transitions?;
+    (first > 0
+        && requests
+            .iter()
+            .all(|request| request.max_transitions == Some(first)))
+    .then_some(first)
+}
+
+fn worker_query_controls(
+    requests: &[UnifiedSignalRequest],
+    ns_per_tick: u64,
+) -> (Option<WorkerTickRange>, Option<usize>) {
+    let range =
+        common_requested_range(requests).and_then(|range| range_to_ticks(range, ns_per_tick));
+    let all_ranges_absent = requests
+        .iter()
+        .all(|request| request.time_range_ns.is_none());
+    let max_transitions = (all_ranges_absent || range.is_some())
+        .then(|| common_max_transitions(requests))
+        .flatten();
+    (range, max_transitions)
+}
+
+fn range_to_ticks(range: (u64, u64), ns_per_tick: u64) -> Option<WorkerTickRange> {
+    let start_tick = range.0 / ns_per_tick;
+    let end_tick = range.1.div_ceil(ns_per_tick);
+    (start_tick < end_tick).then_some(WorkerTickRange {
+        start_tick,
+        end_tick,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct WorkerSignalQueryResponse {
     contract_version: u32,
     file_index: usize,
+    #[serde(default, rename = "generation_id")]
+    _generation_id: Option<u64>,
     timescale: Option<WorkerTimescale>,
     #[serde(rename = "cursor_tick")]
     _cursor_tick: Option<u64>,
+    #[serde(default, rename = "requested_range")]
+    _requested_range: Option<WorkerTickRange>,
+    #[serde(default, rename = "returned_range")]
+    _returned_range: Option<WorkerTickRange>,
+    #[serde(default, rename = "total_available_transitions")]
+    _total_available_transitions: Option<usize>,
+    #[serde(default, rename = "returned_transitions")]
+    _returned_transitions: Option<usize>,
+    #[serde(default, rename = "truncated")]
+    _truncated: Option<bool>,
+    #[serde(default, rename = "downsampled")]
+    _downsampled: Option<bool>,
+    #[serde(default, rename = "downsample_strategy")]
+    _downsample_strategy: Option<String>,
     signals: Vec<WorkerSignalData>,
 }
 
@@ -589,6 +771,8 @@ impl WorkerSignalQueryResponse {
         route: &RemoteSourceRoute,
         requests: &[UnifiedSignalRequest],
         cursor_requested: bool,
+        worker_range_requested: bool,
+        worker_downsample_requested: bool,
     ) -> Result<RemoteSignalQueryResult, SurferWorkerError> {
         validate_contract_version(self.contract_version)?;
         if self.file_index != route.file_index {
@@ -658,15 +842,29 @@ impl WorkerSignalQueryResponse {
                 });
             }
             all_transitions.sort_by_key(|transition| transition.time_ns);
-            let actual_time_range_ns = all_transitions
+            let worker_reported_controls = signal.total_available_transitions.is_some()
+                || signal.returned_transitions.is_some()
+                || signal.returned_range.is_some()
+                || signal.truncated.is_some()
+                || signal.downsampled.is_some();
+            let _worker_applied_range = worker_range_requested && worker_reported_controls;
+            let worker_applied_downsample = worker_downsample_requested && worker_reported_controls;
+            let total_transitions = signal
+                .total_available_transitions
+                .unwrap_or(all_transitions.len());
+            // Worker ranges are whole ticks while the viewport is expressed in
+            // integer nanoseconds. Clamp again after tick conversion so widened
+            // tick bounds cannot leak data outside the exact requested range.
+            let range_transitions = collect_range(&all_transitions, request.time_range_ns);
+            let transitions = if worker_applied_downsample {
+                range_transitions
+            } else {
+                downsample_transitions(range_transitions, request.max_transitions)
+            };
+            let actual_time_range_ns = transitions
                 .first()
-                .zip(all_transitions.last())
+                .zip(transitions.last())
                 .map(|(first, last)| (first.time_ns, last.time_ns));
-            let total_transitions = all_transitions.len();
-            let transitions = downsample_transitions(
-                collect_range(&all_transitions, request.time_range_ns),
-                request.max_transitions,
-            );
             let unique_id = format!(
                 "{source_id}|{}|{}",
                 request.scope_path, request.variable_name
@@ -707,6 +905,16 @@ struct WorkerSignalData {
     _width: u32,
     transitions: Vec<WorkerTransition>,
     cursor_value: Option<WorkerValue>,
+    #[serde(default)]
+    total_available_transitions: Option<usize>,
+    #[serde(default)]
+    returned_transitions: Option<usize>,
+    #[serde(default)]
+    returned_range: Option<WorkerTickRange>,
+    #[serde(default)]
+    truncated: Option<bool>,
+    #[serde(default)]
+    downsampled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -732,12 +940,200 @@ enum WorkerValueKind {
 }
 
 #[derive(Debug, Serialize)]
+struct WorkerCrossprobeRequest {
+    operation: SourceOperation,
+    signal: WorkerSourceSignal,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkerSourceSignal {
+    scope_path: Vec<String>,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waveform_file_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waveform_source_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    index_range: Option<WorkerSourceIndexRange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_module: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    elaboration_context: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkerSourceIndexRange {
+    left: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    right: Option<i64>,
+}
+
+impl From<shared::SourceIndexRange> for WorkerSourceIndexRange {
+    fn from(value: shared::SourceIndexRange) -> Self {
+        Self {
+            left: value.left,
+            right: value.right,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerCrossprobeResponse {
+    contract_version: u32,
+    file_index: usize,
+    operation: SourceOperation,
+    #[serde(default)]
+    status: Option<WorkerSourceResolutionStatus>,
+    #[serde(default)]
+    generation: Option<u64>,
+    #[serde(default)]
+    matches: Vec<WorkerSourceMatch>,
+    #[serde(default)]
+    warnings: Vec<WorkerSourceWarning>,
+}
+
+impl WorkerCrossprobeResponse {
+    fn into_shared(
+        self,
+        expected_index: usize,
+        expected_operation: SourceOperation,
+    ) -> Result<SourceResolution, SurferWorkerError> {
+        validate_contract_version(self.contract_version)?;
+        if self.file_index != expected_index || self.operation != expected_operation {
+            return Err(local_error(
+                "invalid_worker_response",
+                format!(
+                    "Crossprobe response identified file {} / {:?}, expected {} / {:?}",
+                    self.file_index, self.operation, expected_index, expected_operation
+                ),
+                false,
+            ));
+        }
+        let status = self.status.map(Into::into).unwrap_or_else(|| {
+            if self.matches.len() > 1 {
+                SourceResolutionStatus::Ambiguous
+            } else if self.matches.is_empty() {
+                SourceResolutionStatus::NotFound
+            } else {
+                SourceResolutionStatus::Matched
+            }
+        });
+        Ok(SourceResolution {
+            status,
+            generation: self.generation,
+            matches: self
+                .matches
+                .into_iter()
+                .map(WorkerSourceMatch::into_shared)
+                .collect(),
+            warnings: self
+                .warnings
+                .into_iter()
+                .map(|warning| SourceWarning {
+                    code: warning.code,
+                    message: warning.message,
+                })
+                .collect(),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkerSourceResolutionStatus {
+    Matched,
+    Ambiguous,
+    NotFound,
+    Unsupported,
+    Unavailable,
+}
+
+impl From<WorkerSourceResolutionStatus> for SourceResolutionStatus {
+    fn from(value: WorkerSourceResolutionStatus) -> Self {
+        match value {
+            WorkerSourceResolutionStatus::Matched => Self::Matched,
+            WorkerSourceResolutionStatus::Ambiguous => Self::Ambiguous,
+            WorkerSourceResolutionStatus::NotFound => Self::NotFound,
+            WorkerSourceResolutionStatus::Unsupported => Self::Unsupported,
+            WorkerSourceResolutionStatus::Unavailable => Self::Unavailable,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerSourceMatch {
+    file_id: String,
+    line: u64,
+    #[serde(default)]
+    column: Option<u32>,
+    #[serde(default)]
+    end_line: Option<u64>,
+    #[serde(default)]
+    end_column: Option<u32>,
+    symbol: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    hierarchy: Vec<WorkerHierarchyComponent>,
+    confidence: String,
+    provenance: String,
+}
+
+impl WorkerSourceMatch {
+    fn into_shared(self) -> SourceMatch {
+        SourceMatch {
+            file_id: self.file_id,
+            line: self.line,
+            column: self.column,
+            end_line: self.end_line,
+            end_column: self.end_column,
+            symbol: self.symbol,
+            kind: self.kind,
+            hierarchy: self
+                .hierarchy
+                .into_iter()
+                .map(WorkerHierarchyComponent::into_identifier)
+                .collect(),
+            confidence: self.confidence,
+            provenance: self.provenance,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WorkerHierarchyComponent {
+    Identifier(String),
+    Structured { identifier: String },
+}
+
+impl WorkerHierarchyComponent {
+    fn into_identifier(self) -> String {
+        match self {
+            Self::Identifier(identifier) | Self::Structured { identifier } => identifier,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkerSourceWarning {
+    code: String,
+    message: String,
+}
+
+#[derive(Debug, Serialize)]
 struct EmptyRequest {}
 
 #[derive(Debug, Deserialize)]
 struct WorkerReloadResponse {
     contract_version: u32,
     file_index: usize,
+    #[serde(default, rename = "generation_id")]
+    _generation_id: Option<u64>,
     outcome: WorkerReloadOutcome,
     file: WorkerFileMetadata,
 }
@@ -891,14 +1287,27 @@ mod tests {
         let response: WorkerFilesResponse =
             serde_json::from_str(include_str!("../tests/fixtures/worker_files.json"))
                 .expect("deserialize files fixture");
-        validate_contract_version(response.contract_version).expect("contract version");
-        let files: Vec<_> = response
-            .files
-            .into_iter()
-            .map(WorkerFileMetadata::into_shared)
-            .collect();
+        let files = response.into_shared().expect("map listed files");
         assert_eq!(files[0].source_id, "surfer-worker://file/0");
         assert_eq!(files[0].format, "vcd");
+    }
+
+    #[test]
+    fn duplicate_worker_indices_are_rejected_before_creating_source_ids() {
+        let response: WorkerFilesResponse = serde_json::from_str(
+            r#"{
+                "contract_version": 1,
+                "files": [
+                    {"index": 2, "filename": "a.vcd", "format": "vcd", "bytes": 1, "bytes_loaded": 1, "reloading": false, "last_load_ok": true, "last_modified": null},
+                    {"index": 2, "filename": "b.vcd", "format": "vcd", "bytes": 1, "bytes_loaded": 1, "reloading": false, "last_load_ok": true, "last_modified": null}
+                ]
+            }"#,
+        )
+        .expect("deserialize duplicate files");
+        let error = response
+            .into_shared()
+            .expect_err("duplicate file indices must be rejected");
+        assert_eq!(error.code, "duplicate_worker_file_index");
     }
 
     #[test]
@@ -910,6 +1319,24 @@ mod tests {
         assert_eq!(loaded.waveform_file.min_time_ns, Some(0));
         assert_eq!(loaded.waveform_file.max_time_ns, Some(100));
         assert_eq!(loaded.waveform_file.scopes[0].full_name, "top");
+        assert_eq!(
+            loaded.waveform_file.scopes[0].component.as_deref(),
+            Some("counter")
+        );
+        assert_eq!(
+            loaded.waveform_file.scopes[0]
+                .declaration_source
+                .as_ref()
+                .map(|location| (location.path.as_str(), location.line, location.column)),
+            Some(("rtl/counter.sv", 7, Some(1)))
+        );
+        assert_eq!(
+            loaded.waveform_file.scopes[0]
+                .instantiation_source
+                .as_ref()
+                .map(|location| (location.path.as_str(), location.line)),
+            Some(("tb/counter_tb.sv", 21))
+        );
         assert_eq!(loaded.waveform_file.scopes[0].variables[0].name, "clk");
         assert_eq!(loaded.route.scope_paths["top"], vec![String::from("top")]);
     }
@@ -926,6 +1353,9 @@ mod tests {
                 name: "clk".into(),
             }],
             cursor_tick: Some(15),
+            range: None,
+            max_transitions_per_signal: None,
+            downsample: None,
         })
         .expect("serialize query request");
         assert_eq!(request_json, expected_request);
@@ -947,13 +1377,208 @@ mod tests {
             format: VarFormat::Binary,
         };
         let mapped = response
-            .into_shared(&route, &[request], true)
+            .into_shared(&route, &[request], true, false, false)
             .expect("map query response");
         assert_eq!(mapped.signal_data[0].transitions[0].time_ns, 5);
         assert_eq!(mapped.signal_data[0].transitions[0].value, "0");
         assert_eq!(
             mapped.cursor_values["surfer-worker://file/0|top|clk"],
             SignalValue::Present("1".into())
+        );
+    }
+
+    #[test]
+    fn bounded_query_metadata_prevents_duplicate_adapter_downsampling() {
+        let fixture = include_str!("../tests/fixtures/worker_signal_query_bounded.json");
+        let response: WorkerSignalQueryResponse =
+            serde_json::from_str(fixture).expect("deserialize bounded query fixture");
+        let route = RemoteSourceRoute {
+            file_index: 0,
+            ns_per_tick: 1,
+            scope_paths: HashMap::from([("top".into(), vec!["top".into()])]),
+        };
+        let request = UnifiedSignalRequest {
+            file_path: source_id(0),
+            scope_path: "top".into(),
+            variable_name: "clk".into(),
+            time_range_ns: Some((5, 20)),
+            max_transitions: Some(2),
+            format: VarFormat::Binary,
+        };
+        let mapped = response
+            .into_shared(&route, &[request], true, true, true)
+            .expect("map bounded response");
+        assert_eq!(mapped.signal_data[0].total_transitions, 50);
+        assert_eq!(mapped.signal_data[0].transitions.len(), 3);
+        assert_eq!(mapped.signal_data[0].actual_time_range_ns, Some((5, 20)));
+
+        let response: WorkerSignalQueryResponse =
+            serde_json::from_str(fixture).expect("deserialize bounded query fixture again");
+        let local_request = UnifiedSignalRequest {
+            file_path: source_id(0),
+            scope_path: "top".into(),
+            variable_name: "clk".into(),
+            time_range_ns: Some((6, 19)),
+            max_transitions: Some(2),
+            format: VarFormat::Binary,
+        };
+        let locally_controlled = response
+            .into_shared(&route, &[local_request], true, false, false)
+            .expect("apply per-request controls when worker controls were not sent");
+        assert_eq!(locally_controlled.signal_data[0].transitions.len(), 2);
+        assert_eq!(
+            locally_controlled.signal_data[0].actual_time_range_ns,
+            Some((6, 10))
+        );
+
+        assert_eq!(
+            range_to_ticks((5, 20), 2),
+            Some(WorkerTickRange {
+                start_tick: 2,
+                end_tick: 10
+            })
+        );
+        let clamped = collect_range(
+            &[
+                SignalTransition::new(4, "0".into()),
+                SignalTransition::new(8, "1".into()),
+                SignalTransition::new(20, "0".into()),
+            ],
+            Some((5, 19)),
+        );
+        assert_eq!(
+            clamped
+                .iter()
+                .map(|transition| transition.time_ns)
+                .collect::<Vec<_>>(),
+            vec![5, 8]
+        );
+    }
+
+    #[test]
+    fn ambiguous_crossprobe_fixture_preserves_all_matches() {
+        let request = WorkerCrossprobeRequest {
+            operation: SourceOperation::Declaration,
+            signal: WorkerSourceSignal {
+                scope_path: vec!["top".into(), "cpu".into()],
+                name: "valid".into(),
+                waveform_file_index: Some(0),
+                waveform_source_id: Some(source_id(0)),
+                index_range: Some(WorkerSourceIndexRange {
+                    left: 7,
+                    right: Some(0),
+                }),
+                language: Some("system_verilog".into()),
+                top_module: Some("top".into()),
+                elaboration_context: Some(BTreeMap::from([("parameter.WIDTH".into(), "8".into())])),
+            },
+            workspace_id: Some("default".into()),
+        };
+        let expected_request: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/worker_crossprobe_request.json"
+        ))
+        .expect("deserialize expected crossprobe request");
+        assert_eq!(
+            serde_json::to_value(request).expect("serialize crossprobe request"),
+            expected_request
+        );
+
+        let response: WorkerCrossprobeResponse = serde_json::from_str(include_str!(
+            "../tests/fixtures/worker_crossprobe_ambiguous.json"
+        ))
+        .expect("deserialize crossprobe fixture");
+        let resolution = response
+            .into_shared(0, SourceOperation::Declaration)
+            .expect("map crossprobe response");
+        assert_eq!(resolution.status, SourceResolutionStatus::Ambiguous);
+        assert_eq!(resolution.matches.len(), 2);
+        assert_eq!(resolution.matches[0].line, 42);
+        assert_eq!(resolution.matches[1].hierarchy, vec!["top", "cpu"]);
+        assert_eq!(resolution.warnings[0].code, "ambiguous_match");
+    }
+
+    #[test]
+    fn worker_query_controls_are_only_shared_for_uniform_batches() {
+        let request = |range, maximum| UnifiedSignalRequest {
+            file_path: source_id(0),
+            scope_path: "top".into(),
+            variable_name: "clk".into(),
+            time_range_ns: range,
+            max_transitions: maximum,
+            format: VarFormat::Binary,
+        };
+        let heterogeneous_ranges = [
+            request(Some((0, 10)), Some(4)),
+            request(Some((10, 20)), Some(4)),
+        ];
+        assert_eq!(
+            worker_query_controls(&heterogeneous_ranges, 1),
+            (None, None)
+        );
+
+        let heterogeneous_limits = [
+            request(Some((0, 10)), Some(4)),
+            request(Some((0, 10)), Some(8)),
+        ];
+        assert_eq!(
+            worker_query_controls(&heterogeneous_limits, 1),
+            (
+                Some(WorkerTickRange {
+                    start_tick: 0,
+                    end_tick: 10,
+                }),
+                None,
+            )
+        );
+
+        let full_trace = [request(None, Some(4)), request(None, Some(4))];
+        assert_eq!(worker_query_controls(&full_trace, 1), (None, Some(4)));
+    }
+
+    #[test]
+    fn malformed_source_path_is_not_forwarded() {
+        let declaration_only: WorkerFileDetail = serde_json::from_str(include_str!(
+            "../tests/fixtures/worker_file_detail_declaration_only.json"
+        ))
+        .expect("deserialize declaration-only detail");
+        let declaration_only = declaration_only
+            .into_loaded_file(0)
+            .expect("map declaration-only detail");
+        assert!(
+            declaration_only.waveform_file.scopes[0]
+                .declaration_source
+                .is_some()
+        );
+        assert!(
+            declaration_only.waveform_file.scopes[0]
+                .instantiation_source
+                .is_none()
+        );
+
+        let no_metadata: WorkerFileDetail = serde_json::from_str(include_str!(
+            "../tests/fixtures/worker_file_detail_no_source_metadata.json"
+        ))
+        .expect("deserialize detail without metadata");
+        let no_metadata = no_metadata
+            .into_loaded_file(0)
+            .expect("map detail without metadata");
+        assert!(
+            no_metadata.waveform_file.scopes[0]
+                .declaration_source
+                .is_none()
+        );
+
+        let malformed: WorkerFileDetail = serde_json::from_str(include_str!(
+            "../tests/fixtures/worker_file_detail_malformed_source.json"
+        ))
+        .expect("deserialize malformed source detail");
+        let malformed = malformed
+            .into_loaded_file(0)
+            .expect("map malformed source detail");
+        assert!(
+            malformed.waveform_file.scopes[0]
+                .declaration_source
+                .is_none()
         );
     }
 

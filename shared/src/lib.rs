@@ -21,6 +21,14 @@ pub enum UpMsg {
     ReloadSurferFile {
         index: usize,
     },
+    /// Resolve source information through the backend-owned worker adapter.
+    ResolveSource {
+        request_id: String,
+        source_id: String,
+        operation: SourceOperation,
+        signal: SourceSignalIdentity,
+        workspace_id: Option<String>,
+    },
     GetParsingProgress(String),
     LoadConfig,
     SelectWorkspace {
@@ -85,6 +93,18 @@ pub enum DownMsg {
     SurferSourceError {
         operation: SurferSourceOperation,
         index: Option<usize>,
+        error: SurferWorkerError,
+    },
+    SourceResolved {
+        request_id: String,
+        source_id: String,
+        operation: SourceOperation,
+        resolution: SourceResolution,
+    },
+    SourceResolutionFailed {
+        request_id: String,
+        source_id: String,
+        operation: SourceOperation,
         error: SurferWorkerError,
     },
     ParsingError {
@@ -194,6 +214,74 @@ pub struct SurferWorkerError {
     pub code: String,
     pub message: String,
     pub retryable: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceOperation {
+    Declaration,
+    Instantiation,
+    Drivers,
+    Loads,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SourceSignalIdentity {
+    pub scope_path: Vec<String>,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_range: Option<SourceIndexRange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_module: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elaboration_context: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SourceIndexRange {
+    pub left: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceResolutionStatus {
+    Matched,
+    Ambiguous,
+    NotFound,
+    Unsupported,
+    Unavailable,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SourceResolution {
+    pub status: SourceResolutionStatus,
+    pub generation: Option<u64>,
+    pub matches: Vec<SourceMatch>,
+    pub warnings: Vec<SourceWarning>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SourceMatch {
+    pub file_id: String,
+    pub line: u64,
+    pub column: Option<u32>,
+    pub end_line: Option<u64>,
+    pub end_column: Option<u32>,
+    pub symbol: String,
+    pub kind: String,
+    pub hierarchy: Vec<String>,
+    pub confidence: String,
+    pub provenance: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SourceWarning {
+    pub code: String,
+    pub message: String,
 }
 
 // ===== SIGNAL VALUE QUERY TYPES =====
@@ -564,10 +652,27 @@ pub struct ScopeData {
     pub id: String,
     pub name: String,
     pub full_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_components: Option<Vec<String>>,
     pub children: Vec<ScopeData>,
     pub variables: Vec<Signal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declaration_source: Option<SourceLocation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instantiation_source: Option<SourceLocation>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SourceLocation {
+    pub path: String,
+    pub line: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<u32>,
+    pub provenance: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -2005,6 +2110,18 @@ pub fn find_variables_in_scope(scopes: &[ScopeData], scope_id: &str) -> Option<V
 
         if let Some(variables) = find_variables_in_scope(&scope.children, scope_id) {
             return Some(variables);
+        }
+    }
+    None
+}
+
+pub fn find_scope<'a>(scopes: &'a [ScopeData], scope_id: &str) -> Option<&'a ScopeData> {
+    for scope in scopes {
+        if scope.id == scope_id {
+            return Some(scope);
+        }
+        if let Some(found) = find_scope(&scope.children, scope_id) {
+            return Some(found);
         }
     }
     None

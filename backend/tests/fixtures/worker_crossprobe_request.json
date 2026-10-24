@@ -1,0 +1,14 @@
+{
+  "operation": "declaration",
+  "signal": {
+    "scope_path": ["top", "cpu"],
+    "name": "valid",
+    "waveform_file_index": 0,
+    "waveform_source_id": "surfer-worker://file/0",
+    "index_range": { "left": 7, "right": 0 },
+    "language": "system_verilog",
+    "top_module": "top",
+    "elaboration_context": { "parameter.WIDTH": "8" }
+  },
+  "workspace_id": "default"
+}

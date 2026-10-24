@@ -30,6 +30,7 @@ mod format_selection;
 mod panel_layout;
 mod selected_variables_panel;
 mod signal_processing;
+mod surfer_integration;
 mod variable_selection_ui;
 
 /// Main application layout function
@@ -37,6 +38,11 @@ mod variable_selection_ui;
 /// Implements dock-responsive 3-panel layout as specified:
 /// - Default (dock to bottom): Files & Scopes + Variables (top row), Selected Variables (bottom)
 /// - Dock to right: Files & Scopes over Variables (left column), Selected Variables (right)
+pub struct MainLayoutDialogs<'a> {
+    pub file_dialog_visible: &'a zoon::Mutable<bool>,
+    pub surfer_integration: &'a crate::surfer_integration::SurferIntegration,
+}
+
 pub fn main_layout(
     tracked_files: &crate::tracked_files::TrackedFiles,
     selected_variables: &crate::selected_variables::SelectedVariables,
@@ -44,7 +50,7 @@ pub fn main_layout(
     app_config: &crate::config::AppConfig,
     dragging_system: &crate::dragging::DraggingSystem,
     waveform_canvas: &crate::visualizer::canvas::waveform_canvas::WaveformCanvas,
-    file_dialog_visible: &zoon::Mutable<bool>,
+    dialogs: MainLayoutDialogs<'_>,
 ) -> impl Element {
     use crate::file_management::files_panel_with_dialog;
     use crate::variable_selection_ui::variables_panel_with_fill;
@@ -60,7 +66,8 @@ pub fn main_layout(
             let app_config = app_config.clone();
             let dragging_system = dragging_system.clone();
             let waveform_canvas = waveform_canvas.clone();
-            let file_dialog_visible = file_dialog_visible.clone();
+            let file_dialog_visible = dialogs.file_dialog_visible.clone();
+            let surfer_integration = dialogs.surfer_integration.clone();
 
             move |dock_mode| {
                 match dock_mode {
@@ -110,6 +117,7 @@ pub fn main_layout(
                                                         selected_variables.clone(),
                                                         file_dialog_visible.clone(),
                                                         app_config.clone(),
+                                                        surfer_integration.clone(),
                                                     )),
                                             )
                                             .item(
@@ -126,6 +134,7 @@ pub fn main_layout(
                                                         &waveform_timeline,
                                                         &waveform_canvas,
                                                         &app_config,
+                                                        &surfer_integration,
                                                     ),
                                                 ),
                                             ),
@@ -203,6 +212,7 @@ pub fn main_layout(
                                                         selected_variables.clone(),
                                                         file_dialog_visible.clone(),
                                                         app_config.clone(),
+                                                        surfer_integration.clone(),
                                                     )),
                                             )
                                             .item(
@@ -219,6 +229,7 @@ pub fn main_layout(
                                                         &waveform_timeline,
                                                         &waveform_canvas,
                                                         &app_config,
+                                                        &surfer_integration,
                                                     ),
                                                 ),
                                             ),

@@ -1,0 +1,32 @@
+{
+  "contract_version": 1,
+  "file_index": 0,
+  "generation_id": 0,
+  "timescale": { "multiplier": 1, "unit": "ns" },
+  "requested_range": { "start_tick": 5, "end_tick": 20 },
+  "returned_range": { "start_tick": 5, "end_tick": 20 },
+  "total_available_transitions": 50,
+  "returned_transitions": 3,
+  "truncated": true,
+  "downsampled": true,
+  "downsample_strategy": "preserve_edges",
+  "cursor_tick": 15,
+  "signals": [
+    {
+      "scope_path": ["top"],
+      "name": "clk",
+      "width": 1,
+      "total_available_transitions": 50,
+      "returned_transitions": 3,
+      "returned_range": { "start_tick": 5, "end_tick": 20 },
+      "truncated": true,
+      "downsampled": true,
+      "transitions": [
+        { "tick": 5, "value": { "kind": "bits", "text": "0" } },
+        { "tick": 10, "value": { "kind": "bits", "text": "1" } },
+        { "tick": 20, "value": { "kind": "bits", "text": "0" } }
+      ],
+      "cursor_value": { "kind": "bits", "text": "1" }
+    }
+  ]
+}

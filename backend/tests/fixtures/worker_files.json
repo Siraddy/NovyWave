@@ -3,6 +3,7 @@
   "files": [
     {
       "index": 0,
+      "generation_id": 0,
       "filename": "/waveforms/counter.vcd",
       "format": "vcd",
       "bytes": 4096,

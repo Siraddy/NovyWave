@@ -1,0 +1,31 @@
+{
+  "contract_version": 1,
+  "file_index": 0,
+  "operation": "declaration",
+  "generation": 3,
+  "status": "ambiguous",
+  "matches": [
+    {
+      "file_id": "rtl/a.sv",
+      "line": 42,
+      "column": 9,
+      "symbol": "valid",
+      "kind": "logic",
+      "hierarchy": ["top", "cpu"],
+      "confidence": "ambiguous",
+      "provenance": "hdl_index"
+    },
+    {
+      "file_id": "rtl/b.sv",
+      "line": 18,
+      "symbol": "valid",
+      "kind": "logic",
+      "hierarchy": [{ "identifier": "top" }, { "identifier": "cpu" }],
+      "confidence": "ambiguous",
+      "provenance": "hdl_index"
+    }
+  ],
+  "warnings": [
+    { "code": "ambiguous_match", "message": "Two declarations remain after scope filtering" }
+  ]
+}

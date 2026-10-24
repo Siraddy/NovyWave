@@ -1,9 +1,11 @@
 {
   "contract_version": 1,
   "file_index": 0,
+  "generation_id": 1,
   "outcome": "accepted",
   "file": {
     "index": 0,
+    "generation_id": 1,
     "filename": "/waveforms/counter.vcd",
     "format": "vcd",
     "bytes": 4096,

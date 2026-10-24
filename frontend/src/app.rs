@@ -112,6 +112,7 @@ impl ConnectionMessageActor {
         selected_variables: crate::selected_variables::SelectedVariables,
         waveform_timeline: crate::visualizer::timeline::WaveformTimeline,
         config: crate::config::AppConfig,
+        surfer_integration: crate::surfer_integration::SurferIntegration,
         connection: std::sync::Arc<SendWrapper<Connection<UpMsg, DownMsg>>>,
         workspace_picker_domain: crate::config::FilePickerDomain,
     ) {
@@ -254,35 +255,7 @@ impl ConnectionMessageActor {
                                 workspace_picker_domain.on_platform_roots(roots);
                             }
                             DownMsg::SurferFilesListed { files } => {
-                                if let Some(file) = files.first() {
-                                    let filename = std::path::Path::new(&file.filename)
-                                        .file_name()
-                                        .and_then(|name| name.to_str())
-                                        .unwrap_or(&file.filename)
-                                        .to_string();
-                                    tracked_files
-                                        .notify_loading_started(file.source_id.clone(), filename);
-                                    if let Err(error) = connection_for_init
-                                        .send_up_msg(UpMsg::LoadSurferFile { index: file.index })
-                                        .await
-                                    {
-                                        config.error_display.update_toast(
-                                            crate::error_display::ErrorAlert::new_connection_error(
-                                                format!(
-                                                    "Failed to request Surfer file {}: {error:?}",
-                                                    file.index
-                                                ),
-                                            ),
-                                        );
-                                    }
-                                } else {
-                                    config.error_display.update_toast(
-                                        crate::error_display::ErrorAlert::new_connection_error(
-                                            "The Surfer worker has no waveform files configured."
-                                                .to_string(),
-                                        ),
-                                    );
-                                }
+                                surfer_integration.files_listed(files);
                             }
                             DownMsg::SurferFileReloaded { .. } => {
                                 // A fresh FileLoaded message follows and updates the normal path.
@@ -292,6 +265,7 @@ impl ConnectionMessageActor {
                                 index,
                                 error,
                             } => {
+                                surfer_integration.worker_failed(operation, error.clone());
                                 let detail = format!(
                                     "Surfer worker {operation:?} failed ({}): {}",
                                     error.code, error.message
@@ -308,6 +282,24 @@ impl ConnectionMessageActor {
                                 config.error_display.update_toast(
                                     crate::error_display::ErrorAlert::new_connection_error(detail),
                                 );
+                            }
+                            DownMsg::SourceResolved {
+                                request_id,
+                                source_id,
+                                operation,
+                                resolution,
+                            } => {
+                                surfer_integration
+                                    .source_resolved(request_id, source_id, operation, resolution);
+                            }
+                            DownMsg::SourceResolutionFailed {
+                                request_id,
+                                source_id,
+                                operation,
+                                error,
+                            } => {
+                                surfer_integration
+                                    .source_failed(request_id, source_id, operation, error);
                             }
                             // FileLoaded, ParsingError, ParsingStarted are handled directly
                             // in the Connection callback via tf.update_file_state()
@@ -406,6 +398,9 @@ pub struct NovyWaveApp {
     /// Waveform canvas rendering and state domain
     pub waveform_canvas: crate::visualizer::canvas::waveform_canvas::WaveformCanvas,
 
+    /// Worker file selection and source cross-probing domain.
+    pub surfer_integration: crate::surfer_integration::SurferIntegration,
+
     /// Application configuration (theme, panels, etc.)
     pub config: AppConfig,
 
@@ -457,6 +452,8 @@ impl NovyWaveApp {
         Self::load_and_register_fonts().await;
 
         let tracked_files = TrackedFiles::new();
+        let surfer_integration =
+            crate::surfer_integration::SurferIntegration::new(tracked_files.clone());
         // Create shared files_selected_scope - SelectedVariables observes it internally
         let files_selected_scope = zoon::MutableVec::new();
         let selected_variables = SelectedVariables::new(files_selected_scope.clone());
@@ -545,6 +542,7 @@ impl NovyWaveApp {
             selected_variables.clone(),
             waveform_timeline.clone(),
             config.clone(),
+            surfer_integration.clone(),
             connection_arc.clone(),
             workspace_picker_domain.clone(),
         );
@@ -685,6 +683,7 @@ impl NovyWaveApp {
             selected_variables,
             waveform_timeline,
             waveform_canvas,
+            surfer_integration,
             config,
             dragging_system,
             connection: connection_arc,
@@ -1186,6 +1185,22 @@ impl NovyWaveApp {
                     )
                 }
             }))
+            .layer_signal(self.surfer_integration.picker_visible_signal().map_true({
+                let surfer_integration = self.surfer_integration.clone();
+                move || crate::surfer_integration::worker_file_picker(surfer_integration.clone())
+            }))
+            .layer_signal(
+                self.surfer_integration
+                    .source_result_visible_signal()
+                    .map_true({
+                        let surfer_integration = self.surfer_integration.clone();
+                        move || {
+                            crate::surfer_integration::source_resolution_dialog(
+                                surfer_integration.clone(),
+                            )
+                        }
+                    }),
+            )
             .layer(self.toast_notifications_container())
     }
 
@@ -1198,7 +1213,10 @@ impl NovyWaveApp {
             &self.config,
             &self.dragging_system,
             &self.waveform_canvas,
-            &self.file_dialog_visible,
+            crate::MainLayoutDialogs {
+                file_dialog_visible: &self.file_dialog_visible,
+                surfer_integration: &self.surfer_integration,
+            },
         )
     }
 

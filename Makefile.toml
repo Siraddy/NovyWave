@@ -22,6 +22,9 @@ description = "Start in web mode (MoonZoon SSE) with WS server for browser exten
 dependencies = ["install"]
 env = { NOVYWAVE_PLATFORM = "WEB" }
 script = '''
+# MoonZoon writes build IDs and generated packages into these directories.
+mkdir -p backend/private frontend/pkg frontend_dist/_api/pkg
+
 # Build novywave-mcp if needed
 cargo build --release -p novywave-mcp 2>/dev/null || cargo build --release -p novywave-mcp
 

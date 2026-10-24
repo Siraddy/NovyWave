@@ -49,6 +49,7 @@ impl ConnectionAdapter {
                 | UpMsg::ListSurferFiles
                 | UpMsg::LoadSurferFile { .. }
                 | UpMsg::ReloadSurferFile { .. }
+                | UpMsg::ResolveSource { .. }
                 | UpMsg::BrowseDirectory(_)
         );
 

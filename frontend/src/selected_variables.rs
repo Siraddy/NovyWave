@@ -765,6 +765,7 @@ pub struct VariableWithContext {
     pub signal: shared::Signal,
     pub file_id: String,
     pub scope_id: String,
+    pub scope_path: Vec<String>,
 }
 
 pub fn filter_variables_with_context(
@@ -812,13 +813,17 @@ pub fn get_variables_from_tracked_files(
 
     for tracked_file in tracked_files.iter() {
         if let shared::FileState::Loaded(waveform_file) = &tracked_file.state {
-            if let Some(signals) = shared::find_variables_in_scope(&waveform_file.scopes, scope_id)
-            {
-                for signal in signals {
+            if let Some(scope) = shared::find_scope(&waveform_file.scopes, scope_id) {
+                let scope_path = scope
+                    .path_components
+                    .clone()
+                    .unwrap_or_else(|| scope.full_name.split('.').map(str::to_string).collect());
+                for signal in scope.variables.clone() {
                     variables_with_context.push(VariableWithContext {
                         signal,
                         file_id: tracked_file.canonical_path.clone(),
                         scope_id: scope_id.to_string(),
+                        scope_path: scope_path.clone(),
                     });
                 }
             }

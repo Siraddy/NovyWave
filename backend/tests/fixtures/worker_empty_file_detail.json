@@ -1,7 +1,9 @@
 {
   "contract_version": 1,
+  "generation_id": 0,
   "file": {
     "index": 0,
+    "generation_id": 0,
     "filename": "/waveforms/empty.vcd",
     "format": "vcd",
     "bytes": 0,
