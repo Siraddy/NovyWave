@@ -35,6 +35,9 @@ fn platform_log_label() -> &'static str {
 fn message_name(msg: &UpMsg) -> &'static str {
     match msg {
         UpMsg::LoadWaveformFile(_) => "LoadWaveformFile",
+        UpMsg::ListSurferFiles => "ListSurferFiles",
+        UpMsg::LoadSurferFile { .. } => "LoadSurferFile",
+        UpMsg::ReloadSurferFile { .. } => "ReloadSurferFile",
         UpMsg::GetParsingProgress(_) => "GetParsingProgress",
         UpMsg::LoadConfig => "LoadConfig",
         UpMsg::SelectWorkspace { .. } => "SelectWorkspace",
@@ -129,7 +132,12 @@ impl Platform for WebPlatform {
                 // to avoid ERR_EMPTY_RESPONSE during handler startup.
                 let is_critical = matches!(
                     msg,
-                    UpMsg::LoadConfig | UpMsg::SelectWorkspace { .. } | UpMsg::LoadWaveformFile(_)
+                    UpMsg::LoadConfig
+                        | UpMsg::SelectWorkspace { .. }
+                        | UpMsg::LoadWaveformFile(_)
+                        | UpMsg::ListSurferFiles
+                        | UpMsg::LoadSurferFile { .. }
+                        | UpMsg::ReloadSurferFile { .. }
                 );
                 if !SERVER_ALIVE.get() && !is_critical {
                     zoon::println!("platform({label}): suppressing {msg_name}, server not alive");

@@ -49,6 +49,26 @@ pub fn load_files_button_with_progress(
     }))
 }
 
+/// Minimal proof-of-concept hook: request the worker file list. The connection
+/// actor loads the first returned file into the normal tracked-file path.
+pub fn load_surfer_button() -> impl Element {
+    button()
+        .label("Load Surfer")
+        .variant(ButtonVariant::Outline)
+        .size(ButtonSize::Small)
+        .on_press(move || {
+            Task::start(async move {
+                use crate::platform::{CurrentPlatform, Platform};
+                if let Err(error) =
+                    CurrentPlatform::send_message(shared::UpMsg::ListSurferFiles).await
+                {
+                    zoon::eprintln!("Failed to list Surfer worker files: {error}");
+                }
+            });
+        })
+        .build()
+}
+
 /// Clear all files button
 pub fn clear_all_files_button(
     tracked_files: &crate::tracked_files::TrackedFiles,

@@ -253,6 +253,62 @@ impl ConnectionMessageActor {
                                 config.file_picker_domain.on_platform_roots(roots.clone());
                                 workspace_picker_domain.on_platform_roots(roots);
                             }
+                            DownMsg::SurferFilesListed { files } => {
+                                if let Some(file) = files.first() {
+                                    let filename = std::path::Path::new(&file.filename)
+                                        .file_name()
+                                        .and_then(|name| name.to_str())
+                                        .unwrap_or(&file.filename)
+                                        .to_string();
+                                    tracked_files
+                                        .notify_loading_started(file.source_id.clone(), filename);
+                                    if let Err(error) = connection_for_init
+                                        .send_up_msg(UpMsg::LoadSurferFile { index: file.index })
+                                        .await
+                                    {
+                                        config.error_display.update_toast(
+                                            crate::error_display::ErrorAlert::new_connection_error(
+                                                format!(
+                                                    "Failed to request Surfer file {}: {error:?}",
+                                                    file.index
+                                                ),
+                                            ),
+                                        );
+                                    }
+                                } else {
+                                    config.error_display.update_toast(
+                                        crate::error_display::ErrorAlert::new_connection_error(
+                                            "The Surfer worker has no waveform files configured."
+                                                .to_string(),
+                                        ),
+                                    );
+                                }
+                            }
+                            DownMsg::SurferFileReloaded { .. } => {
+                                // A fresh FileLoaded message follows and updates the normal path.
+                            }
+                            DownMsg::SurferSourceError {
+                                operation,
+                                index,
+                                error,
+                            } => {
+                                let detail = format!(
+                                    "Surfer worker {operation:?} failed ({}): {}",
+                                    error.code, error.message
+                                );
+                                if let Some(index) = index {
+                                    tracked_files.update_file_state(
+                                        format!("surfer-worker://file/{index}"),
+                                        shared::FileState::Failed(shared::FileError::IoError {
+                                            path: format!("surfer-worker://file/{index}"),
+                                            error: detail.clone(),
+                                        }),
+                                    );
+                                }
+                                config.error_display.update_toast(
+                                    crate::error_display::ErrorAlert::new_connection_error(detail),
+                                );
+                            }
                             // FileLoaded, ParsingError, ParsingStarted are handled directly
                             // in the Connection callback via tf.update_file_state()
                             DownMsg::BatchSignalValues { file_results, .. } => {

@@ -46,6 +46,9 @@ impl ConnectionAdapter {
             UpMsg::LoadConfig
                 | UpMsg::SelectWorkspace { .. }
                 | UpMsg::LoadWaveformFile(_)
+                | UpMsg::ListSurferFiles
+                | UpMsg::LoadSurferFile { .. }
+                | UpMsg::ReloadSurferFile { .. }
                 | UpMsg::BrowseDirectory(_)
         );
 

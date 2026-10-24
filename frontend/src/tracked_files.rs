@@ -175,6 +175,7 @@ impl TrackedFiles {
                         }) {
                             current[index].id = file_id.clone();
                             current[index].canonical_path = file_id.clone();
+                            current[index].filename = waveform_file.filename.clone();
                             current[index].state = FileState::Loaded(waveform_file);
                             changed = true;
                             reload_completed_clone.set(Some(file_id.clone()));

@@ -29,6 +29,7 @@ pub fn files_panel_with_dialog(
                     Some(IconName::Folder),
                     file_dialog_visible,
                 ))
+                .item(crate::action_buttons::load_surfer_button())
                 .item(El::new().s(Width::growable()))
                 .item(crate::action_buttons::clear_all_files_button(
                     &tracked_files,
